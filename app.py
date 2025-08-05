@@ -45,11 +45,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Função para inicializar o GEE com ID do projeto
+# Função para inicializar o GEE
 def initialize_gee():
-    project_id = "projects/ee-diasgalor"  # ID do projeto embutido
     try:
-        ee.Initialize(project='ee-diasgalor')
+        ee.Initialize()
         return True
     except Exception as e:
         st.error(f"Erro ao inicializar o GEE: {str(e)}")
@@ -90,37 +89,42 @@ def get_infestations():
     conn.close()
     return df
 
-# Função para obter NDVI e NDBI do Sentinel-2 para Chapadão do Sul
+# Função para obter a imagem específica com o índice personalizado
 def get_sentinel2_indices():
     bbox = [-52.65, -19.05, -52.55, -18.95]  # Chapadão do Sul
     geometry = ee.Geometry.Rectangle(bbox)
     
-    collection = (ee.ImageCollection('COPERNICUS/S2_SR')
-                  .filterDate('2024-08-01', '2025-08-04')
-                  .filterBounds(geometry)
-                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
-                  .sort('system:time_start', False))
+    # Carregar a imagem específica
+    image_id = 'COPERNICUS/S2_SR/S2B_MSIL2A_20250723T133839_N0511_R124_T22KCE_20250723T185733'
+    image = ee.Image(image_id).clip(geometry)
     
-    count = collection.size().getInfo()
-    if count == 0:
-        st.error("Nenhuma imagem Sentinel-2 encontrada com menos de 10% de nuvens.")
-        return None, None
-    
-    image = ee.Image(collection.first())
-    
+    # Calcular NDVI e NDBI
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
     ndbi = image.normalizedDifference(['B11', 'B8']).rename('NDBI')
     
-    indices = image.addBands([ndvi, ndbi]).select(['NDVI', 'NDBI']).clip(geometry)
+    # Índice personalizado (adaptado do script do Carlos Bentes)
+    veg_th = 0.4
+    R = image.select('B4').multiply(2.5)
+    G = image.select('B3').multiply(2.5)
+    B = image.select('B2').multiply(2.5)
+    Y = R.multiply(0.2).add(G.multiply(0.7)).add(B.multiply(0.1))
+    rgb_image = Y.addBands([Y, Y]).rename(['R', 'G', 'B'])
+    veg_mask = ndvi.gte(veg_th)
+    rgb_veg = Y.multiply(0.1).addBands([Y.multiply(1.8), Y.multiply(0.1)]).rename(['R', 'G', 'B'])
+    custom_rgb = rgb_image.where(veg_mask, rgb_veg)
     
+    # Exportar NDVI, NDBI e imagem RGB personalizada
     ndvi_file = 'ndvi_chapadao.tif'
     ndbi_file = 'ndbi_chapadao.tif'
+    rgb_file = 'custom_rgb_chapadao.tif'
     if not os.path.exists(ndvi_file):
-        geemap.ee_export_image(indices.select('NDVI'), filename=ndvi_file, scale=10, region=geometry)
+        geemap.ee_export_image(ndvi, filename=ndvi_file, scale=10, region=geometry)
     if not os.path.exists(ndbi_file):
-        geemap.ee_export_image(indices.select('NDBI'), filename=ndbi_file, scale=10, region=geometry)
+        geemap.ee_export_image(ndbi, filename=ndbi_file, scale=10, region=geometry)
+    if not os.path.exists(rgb_file):
+        geemap.ee_export_image(custom_rgb, filename=rgb_file, scale=10, region=geometry)
     
-    return ndvi_file, ndbi_file
+    return ndvi_file, ndbi_file, rgb_file
 
 # Função para extrair valores NDVI e NDBI
 def get_indices_values(ndvi_path, ndbi_path, lon, lat):
@@ -163,13 +167,13 @@ def calculate_ipvu(infestations_gdf, ndvi_path, ndbi_path):
         })
     return pd.DataFrame(ipvu_data)
 
-# Função para criar o mapa com legenda
-def create_map(infestations_df, ndvi_path):
+# Função para criar o mapa com a imagem RGB personalizada e mapa de calor
+def create_map(infestations_df, rgb_path):
     all_points = []
     if not infestations_df.empty:
         all_points.extend([(row.latitude, row.longitude) for _, row in infestations_df.iterrows()])
     
-    with rasterio.open(ndvi_path) as src:
+    with rasterio.open(rgb_path) as src:
         bounds = src.bounds
         all_points.extend([(bounds.bottom, bounds.left), (bounds.top, bounds.right)])
     
@@ -181,15 +185,14 @@ def create_map(infestations_df, ndvi_path):
         m = folium.Map(location=[(min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2], zoom_start=12)
         m.fit_bounds(bounds)
     
-    # Adicionar camada NDVI
-    with rasterio.open(ndvi_path) as src:
-        ndvi_data = src.read(1)
-        ndvi_data = np.clip(ndvi_data, -1, 1)
+    # Adicionar camada RGB personalizada
+    with rasterio.open(rgb_path) as src:
+        rgb_data = src.read([1, 2, 3])  # Ler bandas R, G, B
+        rgb_data = np.clip(rgb_data, 0, 1)  # Normalizar para 0-1
         folium.raster_layers.ImageOverlay(
-            image=ndvi_data,
+            image=rgb_data,
             bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-            colormap=lambda x: (0, 1, 0, x) if x > 0.6 else (1, 1, 0, x) if x > 0.3 else (1, 0, 0, x),
-            opacity=0.6
+            opacity=0.8
         ).add_to(m)
     
     # Adicionar mapa de calor
@@ -215,10 +218,10 @@ def create_map(infestations_df, ndvi_path):
 
 # Inicializar o GEE
 if initialize_gee():
-    ndvi_path, ndbi_path = get_sentinel2_indices()
+    ndvi_path, ndbi_path, rgb_path = get_sentinel2_indices()
 else:
-    ndvi_path, ndbi_path = None, None
-    st.error("Falha ao inicializar o GEE. Verifique o ID do projeto.")
+    ndvi_path, ndbi_path, rgb_path = None, None, None
+    st.error("Falha ao inicializar o GEE. Verifique a autenticação ou conexão.")
 
 # Interface do Streamlit
 st.title("Monitoramento de Infestações de Escorpião")
@@ -254,12 +257,12 @@ with st.container():
 # Inicializar o banco de dados
 init_db()
 
-# Exibir mapa com infestações e camada NDVI
+# Exibir mapa com infestações e camada RGB personalizada
 with st.container():
-    st.header("Mapa de Calor de Infestações com NDVI")
+    st.header("Mapa de Calor de Infestações com Imagem Personalizada")
     infestations_df = get_infestations()
 
-    if not infestations_df.empty and ndvi_path and ndbi_path:
+    if not infestations_df.empty and ndvi_path and ndbi_path and rgb_path:
         infestations_gdf = gpd.GeoDataFrame(
             infestations_df,
             geometry=gpd.points_from_xy(infestations_df.longitude, infestations_df.latitude),
@@ -270,7 +273,7 @@ with st.container():
         ipvu_df = calculate_ipvu(infestations_gdf, ndvi_path, ndbi_path)
         st.dataframe(ipvu_df)
 
-        m = create_map(infestations_df, ndvi_path)
+        m = create_map(infestations_df, rgb_path)
         st_folium(m, width=700, height=500, returned_objects=[])
     else:
-        st.write("Nenhuma infestação registrada ou dados de NDVI/NDBI não disponíveis.")
+        st.write("Nenhuma infestação registrada ou dados de imagem não disponíveis.")
