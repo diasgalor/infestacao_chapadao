@@ -162,19 +162,37 @@ with st.form("infestation_form"):
         st.balloons()
 
 # Exibição do mapa
-df = get_infestations()
-if not df.empty:
-    st.markdown("### 🗺️ Mapa de Ocorrências")
-    with st.spinner('Carregando mapa...'):
-        map_ = create_map(df)
-        st_folium(
-            map_,
-            height=400,
-            width='100%',
-            returned_objects=[]
-        )
-else:
-    st.info("Nenhum registro encontrado. Adicione a primeira ocorrência usando o formulário acima.")
+# Substitua esta parte do código:
+def get_infestations():
+    conn = sqlite3.connect('scorpion_infestation.db')
+    df = pd.read_sql_query("SELECT * FROM infestations", conn)
+    conn.close()
+    
+    # Verificação segura das colunas
+    required_columns = ['latitude', 'longitude', 'infestation_level', 'date']
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = None  # Ou valor padrão apropriado
+            
+    return df
+
+# E na função create_map:
+def create_map(df):
+    # Verificação adicional antes de acessar as colunas
+    if df.empty:
+        m = folium.Map(location=[-19.0, -52.6], zoom_start=13)
+        return m
+    
+    try:
+        heat_data = [
+            [row['latitude'], row['longitude'], 
+             {"Baixo": 1, "Médio": 2, "Alto": 3}[row['infestation_level']]]
+            for _, row in df.iterrows()
+        ]
+    except KeyError as e:
+        st.error(f"Erro nas colunas do DataFrame: {str(e)}")
+        m = folium.Map(location=[-19.0, -52.6], zoom_start=13)
+        return m
 
 # Rodapé informativo
 st.markdown("---")
