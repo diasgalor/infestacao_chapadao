@@ -1,0 +1,29 @@
+import ee
+ee.Initialize()
+
+# Define a imagem Sentinel-2
+image_id = 'COPERNICUS/S2_SR/20250723T133839_20250723T133929_T22KCE'
+image = ee.Image(image_id)
+
+# Geometria (Chapadão do Sul)
+geometry = ee.Geometry.Point([-52.6198, -18.7886]).buffer(5000)  # 5km de buffer
+image_clipped = image.clip(geometry)
+
+# Calcula NDVI
+ndvi = image_clipped.normalizedDifference(['B8', 'B4']).rename('NDVI')
+
+# Exportação para o Google Drive (você fará o download manual depois)
+task = ee.batch.Export.image.toDrive(
+    image=ndvi,
+    description='NDVI_Chapadao_Sul',
+    folder='GEE_Exports',              # Pasta no seu Drive
+    fileNamePrefix='ndbi_chapadao',    # Nome do arquivo (será .tif)
+    region=geometry,
+    scale=10,
+    crs='EPSG:4326',
+    fileFormat='GeoTIFF',              # Formato TIFF
+    maxPixels=1e10
+)
+
+task.start()
+print("Exportação iniciada. Baixe o arquivo do Drive e mova para:\nC:\\Users\\igor.goncalo\\...\\ndbi_chapadao.tif")
