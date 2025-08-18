@@ -1,6 +1,8 @@
 import os
 import re
 from datetime import datetime
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -8,24 +10,53 @@ import plotly.express as px
 st.set_page_config(layout="wide", page_title="Dashboard - Baterias e OS não processadas")
 st.title("Dashboard: Trocas de Baterias / OS não processadas")
 
-# Paths padrão (gerados pelo seu script)
-DEFAULT_REPORT = "relatorio_tecnico_simplificado.xlsx"
-STATUS_REPORT = "relatorio_status.xlsx"
+# --- Pastas padrão ---
+BASE_DIR = Path.cwd()
+PASTA_DADOS = BASE_DIR / "dados"    # coloque os PDFs aqui
+PASTA_SAIDA = BASE_DIR / "saida"    # outputs (relatórios, CSVs)
+PASTA_DADOS.mkdir(exist_ok=True)
+PASTA_SAIDA.mkdir(exist_ok=True)
+
+DEFAULT_REPORT = str(PASTA_SAIDA / "relatorio_tecnico_simplificado.xlsx")
+STATUS_REPORT = str(PASTA_SAIDA / "relatorio_status.xlsx")
 
 # carregamento do relatório principal (aceita upload ou arquivo padrão)
+df = None
 uploaded = st.file_uploader("Carregar relatório (Excel .xlsx) ou CSV", type=["xlsx", "csv"])
 if uploaded:
+    # alguns objetos de upload mantêm o ponteiro; resetar antes de cada tentativa
+    try:
+        uploaded.seek(0)
+    except Exception:
+        pass
     try:
         df = pd.read_excel(uploaded)
     except Exception:
-        df = pd.read_csv(uploaded)
+        try:
+            uploaded.seek(0)
+        except Exception:
+            pass
+        try:
+            df = pd.read_csv(uploaded)
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo enviado: {e}")
+            st.stop()
 else:
     if os.path.exists(DEFAULT_REPORT):
-        df = pd.read_excel(DEFAULT_REPORT)
-        st.info(f"Usando arquivo padrão: {DEFAULT_REPORT}")
+        try:
+            df = pd.read_excel(DEFAULT_REPORT)
+            st.info(f"Usando arquivo padrão: {DEFAULT_REPORT}")
+        except Exception as e:
+            st.error(f"Falha ao ler o arquivo padrão: {e}")
+            st.stop()
     else:
-        st.error(f"Arquivo padrão '{DEFAULT_REPORT}' não encontrado. Faça upload do relatório exportado pelo script.")
+        st.error(f"Arquivo padrão '{DEFAULT_REPORT}' não encontrado. Faça upload do relatório exportado pelo script ou coloque o arquivo em '{PASTA_SAIDA.name}/'.")
         st.stop()
+
+# segurança: garantir que df foi realmente carregado
+if df is None:
+    st.error("Nenhum DataFrame carregado — verifique o arquivo de entrada.")
+    st.stop()
 
 # carregar relatório de status (opcional) para listar OS não processadas
 status_df = None
@@ -81,14 +112,13 @@ col3.metric("Registros que parecem trocar bateria", int(df["IS_TROCA_BATERIA"].s
 st.subheader("OS / PDFs não processadas (relatorio_status.xlsx)")
 if status_df is not None:
     status_df.columns = [c.strip().upper() for c in status_df.columns]
-    # procurar por status diferente de OK
     if "STATUS" in status_df.columns:
-        not_ok = status_df[status_df["STATUS"].str.upper() != "OK"]
+        not_ok = status_df[status_df["STATUS"].astype(str).str.upper() != "OK"]
         if not not_ok.empty:
             st.write(f"{len(not_ok)} arquivos com status != OK")
             st.dataframe(not_ok[["ARQUIVO", "STATUS", "DETALHES", "CAMINHO"]].fillna(""))
             if st.button("Exportar lista de arquivos não processados (.csv)"):
-                outp = "os_nao_processadas.csv"
+                outp = PASTA_SAIDA / "os_nao_processadas.csv"
                 not_ok.to_csv(outp, index=False)
                 st.success(f"Gerado: {outp}")
         else:
@@ -98,29 +128,24 @@ if status_df is not None:
         st.dataframe(status_df)
 else:
     st.info("relatorio_status.xlsx não encontrado. Se quiser, gere-o no script extracao.py ou faça upload manual do arquivo de status.")
-    # alternativa: mostrar arquivos que aparecem no diretório 'os' mas não possuem registros no relatório
-    st.write("Verificando consistência: arquivos na pasta 'os' (se existir) vs registros no relatório")
-    pasta_os = os.path.join(os.getcwd(), "os")
-    if os.path.isdir(pasta_os):
-        arquivos_pdf = sorted([f for f in os.listdir(pasta_os) if f.lower().endswith(".pdf")])
-        st.write(f"{len(arquivos_pdf)} PDFs na pasta 'os'")
-        # extrair nomes base sem extensão
-        arquivos_base = [os.path.splitext(a)[0] for a in arquivos_pdf]
-        # verificar se os nomes (ou números de laudo) aparecem no relatório
-        # tentamos casar pelo NUMERO_LAUDO e pelo nome do arquivo existir em colunas
+    st.write("Verificando consistência: arquivos na pasta 'dados' (se existir) vs registros no relatório")
+    if PASTA_DADOS.is_dir():
+        arquivos_dados = sorted([f for f in os.listdir(PASTA_DADOS) if f.lower().endswith(".pdf")])
+        st.write(f"{len(arquivos_dados)} PDFs na pasta '{PASTA_DADOS.name}'")
+        # verificar nomes que não aparecem representados pelo NUMERO_LAUDO no relatório
         laudos = df["NUMERO_LAUDO"].astype(str).unique().tolist()
-        nao_listados = [a for a in arquivos_pdf if not any(str(l) in a for l in laudos)]
+        nao_listados = [a for a in arquivos_dados if not any(str(l) in a for l in laudos)]
         if nao_listados:
             st.write("Arquivos possivelmente não processados (nomes não casam com NUMERO_LAUDO):")
             st.dataframe(pd.DataFrame({"arquivo": nao_listados}))
             if st.button("Exportar lista de PDFs possivelmente não processados (.csv)"):
-                outp = "pdfs_possiveis_nao_processados.csv"
+                outp = PASTA_SAIDA / "pdfs_possiveis_nao_processados.csv"
                 pd.DataFrame({"arquivo": nao_listados}).to_csv(outp, index=False)
                 st.success(f"Gerado: {outp}")
         else:
-            st.success("Todos os PDFs da pasta 'os' parecem estar representados no relatório (por NUMERO_LAUDO).")
+            st.success(f"Todos os PDFs da pasta '{PASTA_DADOS.name}' parecem estar representados no relatório (por NUMERO_LAUDO).")
     else:
-        st.info("Pasta 'os' não existe neste diretório do projeto.")
+        st.info(f"Pasta '{PASTA_DADOS.name}' não existe neste diretório do projeto. Crie-a e coloque os PDFs lá para validação automática.")
 
 # análise por frota (códigos únicos)
 st.subheader("Frotas (códigos únicos)")
@@ -136,7 +161,7 @@ if not exchanges.empty:
     st.write(f"{len(exchanges)} registros detectados como troca de bateria")
     st.dataframe(exchanges[["NUMERO_LAUDO", "DATA", "FROTA", "PARECER", "ANALISE", "CONCLUSAO"]].reset_index(drop=True))
     if st.button("Exportar trocas detectadas (.csv)"):
-        outp = "trocas_bateria_detectadas.csv"
+        outp = PASTA_SAIDA / "trocas_bateria_detectadas.csv"
         exchanges.to_csv(outp, index=False)
         st.success(f"Gerado: {outp}")
 else:
@@ -163,7 +188,6 @@ if not exchanges.empty:
     fig_bar = px.bar(top30, x="FROTA", y="count",
                      labels={"count":"Número de trocas","FROTA":"Frota"},
                      title="Top 30 frotas por número de trocas")
-    # forçar eixo x como categorical (evita interpretação numérica)
     fig_bar.update_xaxes(type="category")
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -173,10 +197,9 @@ if not exchanges.empty:
 else:
     st.info("Sem dados para calcular intervalos entre trocas.")
 
-# --- Novo card: Vida útil esperada da bateria (12 meses após troca) ---
+# --- Vida útil esperada da bateria (12 meses após troca) ---
 st.subheader("Vida útil esperada da bateria (12 meses após troca)")
 
-# preparar dados de última troca por frota (com base nas trocas detectadas)
 if not exchanges.empty:
     last_troca = exchanges.groupby("FROTA", as_index=False)["DATA_DT"].max()
     # calcular fim esperado adicionando 12 meses
@@ -199,27 +222,22 @@ if not exchanges.empty:
         if not row.empty:
             r = row.iloc[0]
             st.markdown(f"**Última troca:** {r['DATA_DT'].date()}  •  **Fim esperado:** {r['EXPECTED_END'].date()}")
-            # mostrar barra de progresso
             pct = float(r["PCT_ELAPSED"])
             st.progress(int(pct * 100))
             col_a, col_b, col_c = st.columns(3)
             col_a.metric("Dias desde a troca", int(r["DAYS_SINCE_TROCA"]))
             col_b.metric("Dias restantes (aprox.)", int(r["DAYS_REMAINING"]) if pd.notnull(r["DAYS_REMAINING"]) else "N/A")
             col_c.metric("Período total (dias)", int(r["DAYS_TOTAL_EXPECTED"]))
-            # também mostrar histórico de trocas para essa frota
             hist = exchanges[exchanges["FROTA"].astype(str) == select_frota_for_life].sort_values("DATA_DT", ascending=False)
             st.dataframe(hist[["NUMERO_LAUDO","DATA","PARECER","ANALISE","CONCLUSAO"]].reset_index(drop=True))
         else:
             st.warning("Nenhuma troca registrada para o equipamento selecionado.")
     else:
-        # mostrar tabela agregada com porcentagens e dias restantes
         agg_view = last_troca.sort_values("PCT_ELAPSED", ascending=False).reset_index(drop=True)
-        # formatar datas para exibição
         agg_view["DATA_DT"] = agg_view["DATA_DT"].dt.date
         agg_view["EXPECTED_END"] = agg_view["EXPECTED_END"].dt.date
         st.dataframe(agg_view[["FROTA","DATA_DT","EXPECTED_END","DAYS_SINCE_TROCA","DAYS_REMAINING","PCT_ELAPSED"]].head(200))
 
-        # gráfico de progresso (top 30 mais recentes)
         top_progress = agg_view.head(30).copy()
         top_progress["FROTA"] = top_progress["FROTA"].astype(str)
         fig_prog = px.bar(top_progress, x="FROTA", y="PCT_ELAPSED",
