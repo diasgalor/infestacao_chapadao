@@ -10,6 +10,31 @@ import plotly.express as px
 st.set_page_config(layout="wide", page_title="Dashboard - Baterias e OS não processadas")
 st.title("Dashboard: Trocas de Baterias / OS não processadas")
 
+# --- estilo dark / cards ---
+st.markdown(
+    """
+    <style>
+    /* fundo preto */
+    .stApp { background: #0b0b0b; color: #e6e6e6; }
+    /* cartões / contêineres */
+    .card {
+        background: rgba(17,17,17,0.85);
+        padding: 18px;
+        border-radius: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+        margin-bottom: 14px;
+        border: 1px solid rgba(255,255,255,0.03);
+    }
+    .small-muted { color: #aaaaaa; font-size:12px; }
+    /* tabela em dark */
+    .stDataFrame table { background: transparent; color: #e6e6e6; }
+    .stDataFrame th, .stDataFrame td { border-color: rgba(255,255,255,0.03); }
+    body, .stApp, .stMarkdown { font-size: 14px; line-height: 1.45; color: #e6e6e6; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # --- Pastas padrão ---
 BASE_DIR = Path.cwd()
 PASTA_DADOS = BASE_DIR / "dados"    # coloque os PDFs aqui
@@ -113,132 +138,93 @@ df["IS_BATERIA"] = df["TEXTO_COMBINADO"].apply(lambda s: bool(pat_bat.search(s))
 df["IS_TROCA_BATERIA"] = df["TEXTO_COMBINADO"].apply(lambda s: bool(pat_bat.search(s) and pat_troca.search(s)) if (pat_bat and pat_troca) else False)
 
 # criar abas: Análise (conteúdo atual) e Adicionar OS manual
-tabs = st.tabs(["Análise", "Adicionar OS manual"])
+show_analysis_tab = st.sidebar.checkbox("Mostrar aba 'Análises / Extração'", value=True)
 
-with tabs[0]:
-    # painel principal
-    st.header("Resumo geral")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Registros totais", len(df))
-    col2.metric("Registros com menção a bateria", int(df["IS_BATERIA"].sum()))
-    col3.metric("Registros que parecem trocar bateria", int(df["IS_TROCA_BATERIA"].sum()))
+tabs_labels = ["Visualização"]
+if show_analysis_tab:
+    tabs_labels.append("Análises / Extração")
+tabs_labels.append("Adicionar OS manual")
+tabs = st.tabs(tabs_labels)
+tabs_map = {label: tabs[i] for i, label in enumerate(tabs_labels)}
 
-    # listar OS não processadas (usar relatorio_status.xlsx se disponível)
-    st.subheader("OS / PDFs não processadas (relatorio_status.xlsx)")
-    if status_df is not None:
-        status_df.columns = [c.strip().upper() for c in status_df.columns]
-        if "STATUS" in status_df.columns:
-            not_ok = status_df[status_df["STATUS"].astype(str).str.upper() != "OK"]
-            if not not_ok.empty:
-                st.write(f"{len(not_ok)} arquivos com status != OK")
-                st.dataframe(not_ok[["ARQUIVO", "STATUS", "DETALHES", "CAMINHO"]].fillna(""))
-                if st.button("Exportar lista de arquivos não processados (.csv)"):
-                    outp = PASTA_SAIDA / "os_nao_processadas.csv"
-                    not_ok.to_csv(outp, index=False, encoding="utf-8-sig")
-                    st.success(f"Gerado: {outp}")
-            else:
-                st.success("Nenhuma OS com status diferente de OK encontrada no relatorio_status.xlsx")
-        else:
-            st.warning("relatorio_status.xlsx encontrado, mas coluna 'STATUS' não existe. Exibindo todo o arquivo:")
-            st.dataframe(status_df)
-    else:
-        st.info("relatorio_status.xlsx não encontrado. Se quiser, gere-o no script extracao.py ou faça upload manual do arquivo de status.")
-        st.write("Verificando consistência: arquivos na pasta 'dados' (se existir) vs registros no relatório")
-        if PASTA_DADOS.is_dir():
-            arquivos_dados = sorted([f for f in os.listdir(PASTA_DADOS) if f.lower().endswith(".pdf")])
-            st.write(f"{len(arquivos_dados)} PDFs na pasta '{PASTA_DADOS.name}'")
-            # verificar nomes que não aparecem representados pelo NUMERO_LAUDO no relatório
-            laudos = df["NUMERO_LAUDO"].astype(str).unique().tolist()
-            nao_listados = [a for a in arquivos_dados if not any(str(l) in a for l in laudos)]
-            if nao_listados:
-                st.write("Arquivos possivelmente não processados (nomes não casam com NUMERO_LAUDO):")
-                st.dataframe(pd.DataFrame({"arquivo": nao_listados}))
-                if st.button("Exportar lista de PDFs possivelmente não processados (.csv)"):
-                    outp = PASTA_SAIDA / "pdfs_possiveis_nao_processados.csv"
-                    pd.DataFrame({"arquivo": nao_listados}).to_csv(outp, index=False, encoding="utf-8-sig")
-                    st.success(f"Gerado: {outp}")
-            else:
-                st.success(f"Todos os PDFs da pasta '{PASTA_DADOS.name}' parecem estar representados no relatório (por NUMERO_LAUDO).")
-        else:
-            st.info(f"Pasta '{PASTA_DADOS.name}' não existe neste diretório do projeto. Crie-a e coloque os PDFs lá para validação automática.")
+# --- Visualização principal (cards e gráficos) ---
+with tabs_map["Visualização"]:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Resumo geral")
+    c1, c2, c3, c4 = st.columns([1.5,1,1,1])
+    c1.metric("Registros totais", len(df))
+    c2.metric("Menção a bateria", int(df["IS_BATERIA"].sum()))
+    c3.metric("Troca de bateria detectada", int(df["IS_TROCA_BATERIA"].sum()))
+    # mostrar número de PDFs na pasta dados
+    pdf_count = len(list(PASTA_DADOS.glob("*.pdf")))
+    c4.metric("PDFs em dados/", pdf_count)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # análise por frota (códigos únicos)
+    # Frotas
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Frotas (códigos únicos)")
     frotas = sorted(df["FROTA"].dropna().astype(str).unique())
     st.write(f"Total de equipamentos únicos (FROTA): {len(frotas)}")
     st.dataframe(pd.DataFrame({"FROTA": frotas}))
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # tabela de trocas de bateria detectadas
+    # trocas detectadas tabela e export
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Registros com TROCA/ SUBSTITUIÇÃO de bateria (detecção por texto)")
     exchanges = df[df["IS_TROCA_BATERIA"]].copy()
-    # garantir que exista e seja datetime; recalcula a partir da coluna DATA se necessário
-    if "DATA_DT" not in exchanges.columns:
-        exchanges["DATA_DT"] = pd.to_datetime(exchanges.get("DATA", "").astype(str), dayfirst=True, errors="coerce")
-    else:
+    # garantir coluna DATA_DT correta
+    if "DATA_DT" in exchanges.columns:
         exchanges["DATA_DT"] = pd.to_datetime(exchanges["DATA_DT"], dayfirst=True, errors="coerce")
-    # ordenar, colocamos NaT ao final
+    elif "DATA" in exchanges.columns:
+        exchanges["DATA_DT"] = pd.to_datetime(exchanges["DATA"].astype(str), dayfirst=True, errors="coerce")
+    else:
+        exchanges["DATA_DT"] = pd.NaT
     if not exchanges.empty:
+        # garantir FROTA como string para eixo x
+        exchanges["FROTA"] = exchanges["FROTA"].astype(str)
         exchanges = exchanges.sort_values(by="DATA_DT", na_position="last")
-    if not exchanges.empty:
         st.write(f"{len(exchanges)} registros detectados como troca de bateria")
         st.dataframe(exchanges[["NUMERO_LAUDO", "DATA", "FROTA", "PARECER", "ANALISE", "CONCLUSAO"]].reset_index(drop=True))
+
         if st.button("Exportar trocas detectadas (.csv)"):
             outp = PASTA_SAIDA / "trocas_bateria_detectadas.csv"
             exchanges.to_csv(outp, index=False, encoding="utf-8-sig")
             st.success(f"Gerado: {outp}")
     else:
         st.info("Nenhuma troca de bateria detectada com as palavras-chaves atuais.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # calcular intervalos entre trocas por frota
-    st.subheader("Intervalos entre trocas por equipamento (dias)")
+    # gráfico top frotas por número de trocas
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Top frotas por número de trocas")
     if not exchanges.empty:
-        def add_intervals(g):
-            g = g.sort_values("DATA_DT")
-            g["PREV_DATE"] = g["DATA_DT"].shift(1)
-            g["DIAS_DESDE_ULTIMA"] = (g["DATA_DT"] - g["PREV_DATE"]).dt.days
-            return g
-
-        exch_with_intervals = exchanges.groupby("FROTA", group_keys=False).apply(add_intervals)
-        # resumo por frota
-        summary = exch_with_intervals.dropna(subset=["DIAS_DESDE_ULTIMA"]).groupby("FROTA")["DIAS_DESDE_ULTIMA"]\
-            .agg(["count", "mean", "median", "min", "max"]).reset_index().sort_values("count", ascending=False)
-        st.dataframe(summary.reset_index(drop=True))
-        # gráficos
-        # garantir que o eixo x seja tratado como categoria (string)
-        summary["FROTA"] = summary["FROTA"].astype(str)
-        top30 = summary.head(30).copy()
+        summary_cnt = exchanges.groupby("FROTA").size().reset_index(name="count").sort_values("count", ascending=False)
+        top30 = summary_cnt.head(30).copy()
+        top30["FROTA"] = top30["FROTA"].astype(str)
         fig_bar = px.bar(top30, x="FROTA", y="count",
                          labels={"count":"Número de trocas","FROTA":"Frota"},
-                         title="Top 30 frotas por número de trocas")
+                         title="Top 30 frotas por número de trocas",
+                         template="plotly_dark")
         fig_bar.update_xaxes(type="category")
+        fig_bar.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_bar, use_container_width=True)
-
-        if not exch_with_intervals["DIAS_DESDE_ULTIMA"].dropna().empty:
-            fig_hist = px.histogram(exch_with_intervals.dropna(subset=["DIAS_DESDE_ULTIMA"]), x="DIAS_DESDE_ULTIMA", nbins=30, title="Distribuição dos intervalos entre trocas (dias)")
-            st.plotly_chart(fig_hist, use_container_width=True)
     else:
-        st.info("Sem dados para calcular intervalos entre trocas.")
+        st.info("Sem dados para gráfico.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- Vida útil esperada da bateria (12 meses após troca) ---
+    # vida útil progress bar (12 meses)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Vida útil esperada da bateria (12 meses após troca)")
-
     if not exchanges.empty:
         last_troca = exchanges.groupby("FROTA", as_index=False)["DATA_DT"].max()
-        # calcular fim esperado adicionando 12 meses
         last_troca["EXPECTED_END"] = last_troca["DATA_DT"] + pd.DateOffset(months=12)
         today = pd.Timestamp(datetime.utcnow().date())
-
-        # coluna de dias
         last_troca["DAYS_SINCE_TROCA"] = (today - last_troca["DATA_DT"]).dt.days
         last_troca["DAYS_TOTAL_EXPECTED"] = (last_troca["EXPECTED_END"] - last_troca["DATA_DT"]).dt.days
         last_troca["DAYS_REMAINING"] = (last_troca["EXPECTED_END"] - today).dt.days
-        # pct elapsed (clamp 0..1)
         last_troca["PCT_ELAPSED"] = (last_troca["DAYS_SINCE_TROCA"] / last_troca["DAYS_TOTAL_EXPECTED"]).clip(0,1)
 
-        # selector para visualizar um equipamento específico
-        st.write("Escolha um equipamento para ver o progresso da vida útil da bateria (12 meses):")
         select_frota_for_life = st.selectbox("Equipamento (frota)", options=["(todos)"] + sorted(last_troca["FROTA"].astype(str).tolist()))
-
         if select_frota_for_life != "(todos)":
             row = last_troca[last_troca["FROTA"].astype(str) == select_frota_for_life]
             if not row.empty:
@@ -246,12 +232,10 @@ with tabs[0]:
                 st.markdown(f"**Última troca:** {r['DATA_DT'].date()}  •  **Fim esperado:** {r['EXPECTED_END'].date()}")
                 pct = float(r["PCT_ELAPSED"])
                 st.progress(int(pct * 100))
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("Dias desde a troca", int(r["DAYS_SINCE_TROCA"]))
-                col_b.metric("Dias restantes (aprox.)", int(r["DAYS_REMAINING"]) if pd.notnull(r["DAYS_REMAINING"]) else "N/A")
-                col_c.metric("Período total (dias)", int(r["DAYS_TOTAL_EXPECTED"]))
-                hist = exchanges[exchanges["FROTA"].astype(str) == select_frota_for_life].sort_values("DATA_DT", ascending=False)
-                st.dataframe(hist[["NUMERO_LAUDO","DATA","PARECER","ANALISE","CONCLUSAO"]].reset_index(drop=True))
+                ca, cb, cc = st.columns(3)
+                ca.metric("Dias desde a troca", int(r["DAYS_SINCE_TROCA"]))
+                cb.metric("Dias restantes (aprox.)", int(r["DAYS_REMAINING"]) if pd.notnull(r["DAYS_REMAINING"]) else "N/A")
+                cc.metric("Período total (dias)", int(r["DAYS_TOTAL_EXPECTED"]))
             else:
                 st.warning("Nenhuma troca registrada para o equipamento selecionado.")
         else:
@@ -259,21 +243,48 @@ with tabs[0]:
             agg_view["DATA_DT"] = agg_view["DATA_DT"].dt.date
             agg_view["EXPECTED_END"] = agg_view["EXPECTED_END"].dt.date
             st.dataframe(agg_view[["FROTA","DATA_DT","EXPECTED_END","DAYS_SINCE_TROCA","DAYS_REMAINING","PCT_ELAPSED"]].head(200))
-
-            top_progress = agg_view.head(30).copy()
-            top_progress["FROTA"] = top_progress["FROTA"].astype(str)
-            fig_prog = px.bar(top_progress, x="FROTA", y="PCT_ELAPSED",
-                              labels={"PCT_ELAPSED":"% do período (0..1)","FROTA":"Frota"},
-                              title="Progresso da vida útil (12 meses) - Top 30 por prazo decorrido")
-            fig_prog.update_yaxes(tickformat=".0%", range=[0,1])
-            fig_prog.update_xaxes(type="category")
-            st.plotly_chart(fig_prog, use_container_width=True)
     else:
-        st.info("Nenhuma troca detectada — não é possível calcular a vida útil esperada. Ajuste palavras-chave e reanalise.")
+        st.info("Nenhuma troca detectada — não é possível calcular a vida útil esperada.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("Observações: a detecção é por busca textual nas colunas PARECER/ANALISE/CONCLUSAO. Ajuste as palavras-chave na barra lateral para melhorar a captura.")
+    # botão para exportar dataset atual
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Exportar / Recarregar")
+    if st.button("Exportar dataset atual (.csv)"):
+        outp = PASTA_SAIDA / "dataset_atual.csv"
+        df.to_csv(outp, index=False, encoding="utf-8-sig")
+        st.success(f"Dataset exportado: {outp}")
+    if st.button("Exportar dataset atual (.xlsx)"):
+        outp = PASTA_SAIDA / "dataset_atual.xlsx"
+        try:
+            df.to_excel(outp, index=False)
+            st.success(f"Dataset exportado: {outp}")
+        except Exception as e:
+            st.error(f"Falha ao salvar xlsx: {e}. Verifique se 'openpyxl' está instalado.")
+    if st.button("Recarregar / Recontar PDFs"):
+        st.experimental_rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-with tabs[1]:
+# --- Análises / Extração / Importação ---
+with tabs_map.get("Análises / Extração", None):
+    if tabs_map.get("Análises / Extração", None) is not None:
+        with tabs_map["Análises / Extração"]:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.subheader("Processos de extração / importação")
+            st.write("Verificações rápidas e status das importações/extracões.")
+            col_a, col_b = st.columns(2)
+            col_a.write("Pasta de dados:")
+            col_a.write(f"- Path: {PASTA_DADOS}")
+            col_a.write(f"- PDFs encontrados: {pdf_count}")
+            col_b.write("Relatórios:")
+            col_b.write(f"- Relatório padrão (saida): {DEFAULT_REPORT}")
+            col_b.write(f"- Status report presente: {'Sim' if status_df is not None else 'Não'}")
+            st.caption("Sugestão: para persistência confiável considere usar um único arquivo mestre (xlsx/csv) como fonte de verdade ou um pequeno banco SQLite para concorrência.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# --- Adicionar OS manualmente e persistência ---
+with tabs_map["Adicionar OS manual"]:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.header("Adicionar O.S. manualmente")
     st.write("Use este formulário para inserir um laudo/O.S. que não foi processado automaticamente. Campos obrigatórios: NUMERO_LAUDO, DATA, FROTA.")
     with st.form("form_adicionar_os", clear_on_submit=True):
@@ -304,12 +315,35 @@ with tabs[1]:
                     df_rec.to_csv(manual_csv, mode="a", header=False, index=False, encoding="utf-8-sig")
                 else:
                     df_rec.to_csv(manual_csv, index=False, encoding="utf-8-sig")
-                st.success(f"O.S. salva em: {manual_csv}")
 
-                # anexar ao DataFrame em memória para que apareça na análise atual
+                # persistir também no DEFAULT_REPORT (xlsx) — cria/atualiza
+                try:
+                    if os.path.exists(DEFAULT_REPORT):
+                        try:
+                            df_report = pd.read_excel(DEFAULT_REPORT)
+                        except Exception:
+                            df_report = pd.DataFrame(columns=["NUMERO_LAUDO", "DATA", "FROTA", "PARECER", "ANALISE", "CONCLUSAO"])
+                    else:
+                        df_report = pd.DataFrame(columns=["NUMERO_LAUDO", "DATA", "FROTA", "PARECER", "ANALISE", "CONCLUSAO"])
+                    df_report = pd.concat([df_report, df_rec], ignore_index=True)
+                    # remover duplicados mantendo o mais recente (com base em igualdade NUMERO_LAUDO+FROTA)
+                    df_report["NUMERO_LAUDO"] = df_report["NUMERO_LAUDO"].astype(str)
+                    df_report["FROTA"] = df_report["FROTA"].astype(str)
+                    df_report = df_report.drop_duplicates(subset=["NUMERO_LAUDO","FROTA"], keep="last")
+                    try:
+                        df_report.to_excel(DEFAULT_REPORT, index=False)
+                        st.success(f"O.S. salva em: {manual_csv} e persistida em {DEFAULT_REPORT}")
+                    except Exception as e:
+                        # fallback para CSV se não conseguir salvar xlsx
+                        outp_csv = PASTA_SAIDA / "relatorio_tecnico_simplificado.csv"
+                        df_report.to_csv(outp_csv, index=False, encoding="utf-8-sig")
+                        st.warning(f"Salvo em CSV (fallback) em {outp_csv} porque falhou salvar xlsx: {e}")
+                except Exception as e:
+                    st.warning(f"Falha ao persistir no DEFAULT_REPORT: {e}")
+
+                # anexar ao DataFrame em memória e recalcular campos derivados
                 try:
                     df = pd.concat([df, df_rec], ignore_index=True)
-                    # recalcular campos derivados para incluir novo registro
                     df["DATA_DT"] = pd.to_datetime(df["DATA"].astype(str), dayfirst=True, errors="coerce")
                     df["TEXTO_COMBINADO"] = (
                         df["PARECER"].fillna("").astype(str) + " " +
@@ -318,9 +352,10 @@ with tabs[1]:
                     ).str.upper()
                     df["IS_BATERIA"] = df["TEXTO_COMBINADO"].apply(lambda s: bool(pat_bat.search(s)) if pat_bat else False)
                     df["IS_TROCA_BATERIA"] = df["TEXTO_COMBINADO"].apply(lambda s: bool(pat_bat.search(s) and pat_troca.search(s)) if (pat_bat and pat_troca) else False)
-                    st.info("Registro adicionado à análise em memória.")
+                    st.info("Registro adicionado e análise atualizada.")
+                    st.experimental_rerun()
                 except Exception:
-                    pass
+                    st.info("Registro salvo, mas não foi possível atualizar a análise em memória automaticamente.")
             except Exception as e:
                 st.error(f"Falha ao salvar O.S. manual: {e}")
 
@@ -339,3 +374,4 @@ with tabs[1]:
             st.error(f"Falha ao ler histórico: {e}")
     else:
         st.info("Nenhum registro manual salvo ainda. Registros serão salvos em: ./saida/manual_additions.csv")
+    st.markdown('</div>', unsafe_allow_html=True)
