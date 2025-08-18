@@ -1,0 +1,161 @@
+import os
+import re
+import argparse
+from pathlib import Path
+
+import pandas as pd
+
+# prefer fitz (PyMuPDF); fallback to pymupdf if needed
+try:
+    import fitz
+except Exception:
+    try:
+        import pymupdf as fitz
+    except Exception as e:
+        raise ImportError("PyMuPDF não encontrado. Instale 'pymupdf' (pip install pymupdf)") from e
+
+BASE_DIR = Path.cwd()
+PASTA_DADOS = BASE_DIR / "dados"
+PASTA_SAIDA = BASE_DIR / "saida"
+PASTA_DADOS.mkdir(exist_ok=True)
+PASTA_SAIDA.mkdir(exist_ok=True)
+
+
+def extrair_laudo_para_dataframe(caminho_pdf):
+    texto_total = ""
+    try:
+        doc = fitz.open(str(caminho_pdf))
+    except Exception as e:
+        print(f"[ERRO] Falha ao abrir PDF {caminho_pdf}: {e}")
+        return pd.DataFrame()
+
+    for pagina in doc:
+        try:
+            texto_total += pagina.get_text()
+        except Exception:
+            # fallback: tentar extrair via page.get_text("text")
+            try:
+                texto_total += pagina.get_text("text")
+            except Exception:
+                continue
+    doc.close()
+
+    if not texto_total:
+        return pd.DataFrame()
+
+    # Normaliza o texto (mapa simples para acentos comuns)
+    texto_total = texto_total.upper()
+    replacements = {
+        "Ã": "A", "Á": "A", "À": "A", "Â": "A",
+        "Ç": "C",
+        "Ê": "E", "É": "E",
+        "Í": "I",
+        "Ó": "O", "Ô": "O",
+        "Ú": "U",
+    }
+    for k, v in replacements.items():
+        texto_total = texto_total.replace(k, v)
+
+    linhas = [linha.strip() for linha in texto_total.splitlines() if linha.strip() != ""]
+
+    # Extrair número do laudo do nome do arquivo
+    numero_laudo_m = re.search(r"\d{4,}", os.path.basename(str(caminho_pdf)))
+    numero_laudo = numero_laudo_m.group() if numero_laudo_m else ""
+
+    # Extrair data (formato DD/MM/AAAA)
+    match_data = re.search(r"\b\d{2}/\d{2}/\d{4}\b", texto_total)
+    data_laudo = match_data.group() if match_data else ""
+
+    # Função auxiliar para extrair campos por rótulo na linha
+    def buscar_campo(nome_campo):
+        for i, linha in enumerate(linhas):
+            if nome_campo in linha:
+                return linhas[i + 1] if i + 1 < len(linhas) else ""
+        return ""
+
+    parecer = buscar_campo("PARECER")
+    analise = buscar_campo("ANALISE DO TECNICO")
+    conclusao = buscar_campo("CONCLUSAO")
+
+    # Identificar FROTAS: tentativa por bloco ao encontrar "ACAO"
+    frotas = set()
+    try:
+        idx_inicio = linhas.index("ACAO")
+        i = idx_inicio + 1
+        while i + 5 < len(linhas):
+            bloco = linhas[i:i + 6]
+            # bloco[3] costuma ser o código da frota segundo heurística original
+            if len(bloco) > 3 and re.match(r"^\d{3,6}$", bloco[3]):
+                frotas.add(bloco[3])
+                i += 6
+            else:
+                i += 1
+    except ValueError:
+        # cabeçalho 'ACAO' não encontrado; tentar heurística alternativa:
+        for linha in linhas:
+            m = re.match(r"^FROTA[:\s]*([0-9]{3,6})", linha)
+            if m:
+                frotas.add(m.group(1))
+
+    registros = []
+    for frota in sorted(frotas):
+        registros.append({
+            "NUMERO_LAUDO": numero_laudo,
+            "DATA": data_laudo,
+            "FROTA": frota,
+            "PARECER": parecer,
+            "ANALISE": analise,
+            "CONCLUSAO": conclusao
+        })
+
+    return pd.DataFrame(registros)
+
+
+def processar_pdfs_em_pasta(pasta_pdfs: Path, out_csv: Path):
+    registros_gerais = []
+
+    print(f"[INFO] Pasta informada: {pasta_pdfs}")
+    if not pasta_pdfs.exists() or not pasta_pdfs.is_dir():
+        print(f"[ERRO] Pasta inválida: {pasta_pdfs}")
+        return
+
+    arquivos = sorted([f for f in pasta_pdfs.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"])
+    print(f"[INFO] PDFs encontrados: {len(arquivos)}")
+
+    for caminho_pdf in arquivos:
+        print(f"[INFO] Processando: {caminho_pdf.name}")
+        try:
+            df = extrair_laudo_para_dataframe(caminho_pdf)
+            if not df.empty:
+                registros_gerais.append(df)
+            else:
+                print(f"[AVISO] Nenhum registro extraído de: {caminho_pdf.name}")
+        except Exception as e:
+            print(f"[ERRO] Falha ao processar {caminho_pdf.name}: {e}")
+
+    if registros_gerais:
+        df_final = pd.concat(registros_gerais, ignore_index=True)
+        # garantir colunas esperadas
+        for col in ["NUMERO_LAUDO", "DATA", "FROTA", "PARECER", "ANALISE", "CONCLUSAO"]:
+            if col not in df_final.columns:
+                df_final[col] = ""
+        # exportar CSV (utf-8-sig para Excel compatível)
+        df_final.to_csv(out_csv, index=False, encoding="utf-8-sig")
+        print(f"[SUCESSO] Relatório gerado: {out_csv} ({len(df_final)} registros)")
+    else:
+        print("[INFO] Nenhum PDF processado com sucesso.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Processar PDFs em ./dados e gerar relatório CSV em ./saida.")
+    parser.add_argument("pasta", nargs="?", default=str(PASTA_DADOS),
+                        help="pasta contendo arquivos .pdf (padrão: ./dados)")
+    parser.add_argument("--out", "-o", nargs="?", default=str(PASTA_SAIDA / "relatorio_tecnico_simplificado.csv"),
+                        help="caminho do CSV de saída (padrão: ./saida/relatorio_tecnico_simplificado.csv)")
+    args = parser.parse_args()
+
+    pasta = Path(args.pasta)
+    out_csv = Path(args.out)
+    PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
+
+    processar_pdfs_em_pasta(pasta, out_csv)
